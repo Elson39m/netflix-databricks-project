@@ -1,0 +1,336 @@
+-- Databricks notebook source
+SELECT type, COUNT(*) AS total
+FROM workspace.default.netflix_silver
+GROUP BY type
+ORDER BY total DESC;
+
+-- COMMAND ----------
+
+-- MAGIC %python
+-- MAGIC # ============================================
+-- MAGIC # Netflix Titles — NLP & Word Clouds Section
+-- MAGIC # ============================================
+-- MAGIC
+-- MAGIC # Core libraries
+-- MAGIC %pip install wordcloud
+-- MAGIC import pandas as pd
+-- MAGIC import numpy as np
+-- MAGIC
+-- MAGIC # Visualization
+-- MAGIC import matplotlib.pyplot as plt
+-- MAGIC from wordcloud import WordCloud
+-- MAGIC
+-- MAGIC # NLP & TF-IDF
+-- MAGIC import nltk
+-- MAGIC from nltk.corpus import stopwords
+-- MAGIC from sklearn.feature_extraction.text import TfidfVectorizer
+-- MAGIC
+-- MAGIC nltk.download("stopwords")
+-- MAGIC
+-- MAGIC # -----------------------------
+-- MAGIC # 1. Load dataset
+-- MAGIC # -----------------------------
+-- MAGIC raw_path = "/Volumes/workspace/default/netflix_volume/netflix_titles.csv"
+-- MAGIC
+-- MAGIC df = spark.read.format("csv").option("header", "true").load(raw_path)
+-- MAGIC df.show(5)
+-- MAGIC
+-- MAGIC # Focus on fields relevant for NLP
+-- MAGIC text_df = df.select("title", "type", "listed_in", "description")
+-- MAGIC text_df = text_df.dropna(subset=["description"])
+-- MAGIC
+-- MAGIC
+-- MAGIC # -----------------------------
+-- MAGIC # 2. Text cleaning utilities
+-- MAGIC # -----------------------------
+-- MAGIC
+-- MAGIC stop_words = set(stopwords.words("english"))
+-- MAGIC
+-- MAGIC def clean_text(text):
+-- MAGIC     """
+-- MAGIC     Basic text cleaning:
+-- MAGIC     - lowercase
+-- MAGIC     - remove non-alphabetic characters
+-- MAGIC     - remove stopwords and very short words
+-- MAGIC     """
+-- MAGIC     text = str(text).lower()
+-- MAGIC     tokens = []
+-- MAGIC     for token in text.split():
+-- MAGIC         token = "".join(ch for ch in token if ch.isalpha())
+-- MAGIC         if len(token) > 2 and token not in stop_words:
+-- MAGIC             tokens.append(token)
+-- MAGIC     return " ".join(tokens)
+-- MAGIC
+-- MAGIC raw_path = "/Volumes/workspace/default/netflix_volume/netflix_titles.csv"
+-- MAGIC
+-- MAGIC # Load into Spark
+-- MAGIC df = spark.read.option("header", True).csv(raw_path)
+-- MAGIC
+-- MAGIC # Convert to Pandas
+-- MAGIC pdf = df.toPandas()
+-- MAGIC
+-- MAGIC # Work with Pandas from now on
+-- MAGIC text_df = pdf[["title", "type", "listed_in", "description"]].copy()
+-- MAGIC
+-- MAGIC text_df.dropna(subset=["description"], inplace=True)
+-- MAGIC text_df["clean_description"] = text_df["description"].apply(clean_text)
+-- MAGIC
+-- MAGIC
+-- MAGIC # -----------------------------
+-- MAGIC # 3. Helper: plot word cloud
+-- MAGIC # -----------------------------
+-- MAGIC
+-- MAGIC def plot_wordcloud(text, title="", max_words=200, colormap="viridis"):
+-- MAGIC     """
+-- MAGIC     Generate and plot a word cloud from raw text.
+-- MAGIC     """
+-- MAGIC     if not isinstance(text, str) or len(text.strip()) == 0:
+-- MAGIC         print(f"[INFO] Empty text for wordcloud: '{title}'")
+-- MAGIC         return
+-- MAGIC     
+-- MAGIC     wc = WordCloud(
+-- MAGIC         width=1200,
+-- MAGIC         height=600,
+-- MAGIC         background_color="white",
+-- MAGIC         max_words=max_words,
+-- MAGIC         collocations=False,
+-- MAGIC         colormap=colormap
+-- MAGIC     ).generate(text)
+-- MAGIC     
+-- MAGIC     plt.figure(figsize=(12, 6))
+-- MAGIC     plt.imshow(wc, interpolation="bilinear")
+-- MAGIC     plt.axis("off")
+-- MAGIC     plt.title(title, fontsize=18, weight="bold")
+-- MAGIC     plt.tight_layout()
+-- MAGIC     plt.show()
+-- MAGIC
+-- MAGIC
+
+-- COMMAND ----------
+
+-- MAGIC %python
+-- MAGIC # -----------------------------
+-- MAGIC # 4. Global description word cloud
+-- MAGIC # -----------------------------
+-- MAGIC
+-- MAGIC all_text = " ".join(text_df["clean_description"].tolist())
+-- MAGIC plot_wordcloud(
+-- MAGIC     all_text,
+-- MAGIC     title="Netflix — Global Description Word Cloud (All Titles)"
+-- MAGIC )
+
+-- COMMAND ----------
+
+-- MAGIC %python
+-- MAGIC # -----------------------------
+-- MAGIC # 5. Movie vs TV Show word clouds
+-- MAGIC # -----------------------------
+-- MAGIC
+-- MAGIC movies_text = " ".join(text_df[text_df["type"] == "Movie"]["clean_description"].tolist())
+-- MAGIC tv_text     = " ".join(text_df[text_df["type"] == "TV Show"]["clean_description"].tolist())
+-- MAGIC
+-- MAGIC plt.figure(figsize=(18, 8))
+-- MAGIC
+-- MAGIC plt.subplot(1, 2, 1)
+-- MAGIC wc_movie = WordCloud(
+-- MAGIC     width=800,
+-- MAGIC     height=400,
+-- MAGIC     background_color="white",
+-- MAGIC     max_words=200,
+-- MAGIC     collocations=False,
+-- MAGIC     colormap="plasma"
+-- MAGIC ).generate(movies_text)
+-- MAGIC plt.imshow(wc_movie, interpolation="bilinear")
+-- MAGIC plt.axis("off")
+-- MAGIC plt.title("Movies — Description Word Cloud", fontsize=16, weight="bold")
+-- MAGIC
+-- MAGIC plt.subplot(1, 2, 2)
+-- MAGIC wc_tv = WordCloud(
+-- MAGIC     width=800,
+-- MAGIC     height=400,
+-- MAGIC     background_color="white",
+-- MAGIC     max_words=200,
+-- MAGIC     collocations=False,
+-- MAGIC     colormap="magma"
+-- MAGIC ).generate(tv_text)
+-- MAGIC plt.imshow(wc_tv, interpolation="bilinear")
+-- MAGIC plt.axis("off")
+-- MAGIC plt.title("TV Shows — Description Word Cloud", fontsize=16, weight="bold")
+-- MAGIC
+-- MAGIC plt.tight_layout()
+-- MAGIC plt.show()
+-- MAGIC
+
+-- COMMAND ----------
+
+-- MAGIC %python
+-- MAGIC # ============================================================
+-- MAGIC # 6. NEW CONCEPT: TF-IDF "Keyword Intensity" for Movies vs TV
+-- MAGIC # ============================================================
+-- MAGIC
+-- MAGIC # We will:
+-- MAGIC # - Vectorize descriptions using TF-IDF with unigrams + bigrams
+-- MAGIC # - Compute average TF-IDF score per term separately for Movies and TV Shows
+-- MAGIC # - Visualize the top keywords that characterize each category
+-- MAGIC
+-- MAGIC sample_df = text_df.sample(
+-- MAGIC     n=min(2000, len(text_df)), 
+-- MAGIC     random_state=42
+-- MAGIC ).reset_index(drop=True)
+-- MAGIC
+-- MAGIC # TF-IDF Vectorizer
+-- MAGIC tfidf = TfidfVectorizer(
+-- MAGIC     max_features=5000,
+-- MAGIC     ngram_range=(1, 2),   # unigrams + bigrams
+-- MAGIC     min_df=5            
+-- MAGIC )
+-- MAGIC
+-- MAGIC tfidf_matrix = tfidf.fit_transform(sample_df["clean_description"])
+-- MAGIC feature_names = np.array(tfidf.get_feature_names_out())
+-- MAGIC
+-- MAGIC def top_terms_for_mask(mask, top_n=15):
+-- MAGIC     """
+-- MAGIC     mask: boolean mask for rows (e.g., movies vs tv shows)
+-- MAGIC     Returns top_n terms and scores for that group based on mean TF-IDF.
+-- MAGIC     """
+-- MAGIC     # Convert pandas Series -> NumPy boolean array 
+-- MAGIC     mask = np.asarray(mask, dtype=bool)
+-- MAGIC     
+-- MAGIC     if mask.sum() == 0:
+-- MAGIC         return np.array([]), np.array([])
+-- MAGIC     
+-- MAGIC     # Take rows for that group
+-- MAGIC     group_matrix = tfidf_matrix[mask]
+-- MAGIC     # Mean score per feature
+-- MAGIC     mean_scores = group_matrix.mean(axis=0).A1
+-- MAGIC     top_idx = np.argsort(mean_scores)[::-1][:top_n]
+-- MAGIC     return feature_names[top_idx], mean_scores[top_idx]
+-- MAGIC
+-- MAGIC movies_mask = sample_df["type"] == "Movie"
+-- MAGIC tv_mask     = sample_df["type"] == "TV Show"
+-- MAGIC
+-- MAGIC movie_terms, movie_scores = top_terms_for_mask(movies_mask, top_n=15)
+-- MAGIC tv_terms, tv_scores       = top_terms_for_mask(tv_mask, top_n=15)
+-- MAGIC
+-- MAGIC
+
+-- COMMAND ----------
+
+-- MAGIC %python
+-- MAGIC # -----------------------------
+-- MAGIC # 7. Plot TF-IDF keyword bars
+-- MAGIC # -----------------------------
+-- MAGIC
+-- MAGIC def plot_keyword_bars(terms, scores, title):
+-- MAGIC     if len(terms) == 0:
+-- MAGIC         print(f"[INFO] No terms to plot for: {title}")
+-- MAGIC         return
+-- MAGIC     
+-- MAGIC     plt.figure(figsize=(10, 6))
+-- MAGIC     y_pos = np.arange(len(terms))
+-- MAGIC     plt.barh(y_pos, scores)
+-- MAGIC     plt.yticks(y_pos, terms, fontsize=11)
+-- MAGIC     plt.gca().invert_yaxis()
+-- MAGIC     plt.xlabel("Mean TF-IDF Score", fontsize=12)
+-- MAGIC     plt.title(title, fontsize=16, weight="bold")
+-- MAGIC     plt.tight_layout()
+-- MAGIC     plt.show()
+-- MAGIC
+-- MAGIC plot_keyword_bars(
+-- MAGIC     movie_terms,
+-- MAGIC     movie_scores,
+-- MAGIC     "Top TF-IDF Keywords — Movies"
+-- MAGIC )
+-- MAGIC
+-- MAGIC plot_keyword_bars(
+-- MAGIC     tv_terms,
+-- MAGIC     tv_scores,
+-- MAGIC     "Top TF-IDF Keywords — TV Shows"
+-- MAGIC )
+
+-- COMMAND ----------
+
+-- MAGIC %python
+-- MAGIC # 1. Install dependencies (run once)
+-- MAGIC %pip install pandas matplotlib seaborn wordcloud
+-- MAGIC
+-- MAGIC # 2. Imports
+-- MAGIC import pandas as pd
+-- MAGIC import matplotlib.pyplot as plt
+-- MAGIC import seaborn as sns
+-- MAGIC from wordcloud import WordCloud
+-- MAGIC
+-- MAGIC sns.set_style("darkgrid")
+-- MAGIC
+-- MAGIC # 3. Load data (adjust path to your environment)
+-- MAGIC df = pd.read_csv("/Volumes/workspace/default/netflix_volume/netflix_titles.csv")
+-- MAGIC
+-- MAGIC # 4. Basic cleaning
+-- MAGIC df = df.dropna(subset=["description"])  # drop rows with missing descriptions
+-- MAGIC
+-- MAGIC # 5. Basic stats / info
+-- MAGIC print(df.shape)
+-- MAGIC print(df.info())
+-- MAGIC print(df["type"].value_counts())
+-- MAGIC print(df["listed_in"].head())
+-- MAGIC
+-- MAGIC # 6. Visualization: Movies vs TV Shows (bar / pie)
+-- MAGIC plt.figure(figsize=(6,6))
+-- MAGIC df["type"].value_counts().plot.pie(autopct="%1.1f%%", startangle=90)
+-- MAGIC plt.title("Movies vs TV Shows on Netflix")
+-- MAGIC plt.ylabel("")
+-- MAGIC plt.show()
+-- MAGIC
+-- MAGIC # 7. Top genres (since listed_in may contain multiple genres per row)
+-- MAGIC genres_series = df["listed_in"].str.split(", ").explode().value_counts().head(15)
+-- MAGIC plt.figure(figsize=(10,6))
+-- MAGIC sns.barplot(y=genres_series.index, x=genres_series.values)
+-- MAGIC plt.title("Top 15 Genres on Netflix")
+-- MAGIC plt.xlabel("Number of Titles")
+-- MAGIC plt.ylabel("Genre")
+-- MAGIC plt.show()
+-- MAGIC
+-- MAGIC # 8. Top production countries
+-- MAGIC # Assume 'country' column, similar to many notebooks — if column name differs, adjust
+-- MAGIC country_series = df["country"].dropna().str.split(", ").explode().value_counts().head(15)
+-- MAGIC plt.figure(figsize=(10,6))
+-- MAGIC sns.barplot(y=country_series.index, x=country_series.values)
+-- MAGIC plt.title("Top 15 Production Countries")
+-- MAGIC plt.xlabel("Number of Titles")
+-- MAGIC plt.ylabel("Country")
+-- MAGIC plt.show()
+-- MAGIC
+-- MAGIC # 9. Release-year or date-added trends
+-- MAGIC df["release_year"] = pd.to_numeric(df["release_year"], errors="coerce")
+-- MAGIC plt.figure(figsize=(12,6))
+-- MAGIC sns.histplot(data=df, x="release_year", bins=30, kde=False)
+-- MAGIC plt.title("Distribution of Release Year")
+-- MAGIC plt.xlabel("Release Year")
+-- MAGIC plt.show()
+-- MAGIC
+-- MAGIC # 10. WordCloud based on titles or description
+-- MAGIC text = " ".join(df["description"].tolist())
+-- MAGIC wc = WordCloud(width=1200, height=600, background_color="white", max_words=200, collocations=False).generate(text)
+-- MAGIC plt.figure(figsize=(12,6))
+-- MAGIC plt.imshow(wc, interpolation="bilinear")
+-- MAGIC plt.axis("off")
+-- MAGIC plt.title("Word Cloud of Descriptions")
+-- MAGIC plt.show()
+-- MAGIC
+-- MAGIC # 11. Rating Distribution
+-- MAGIC sns.countplot(data=df, x='rating', order=df['rating'].value_counts().index, palette='coolwarm')
+-- MAGIC plt.xticks(rotation=45)
+-- MAGIC plt.title('Distribution of Ratings on Netflix')
+-- MAGIC plt.xlabel('Rating')
+-- MAGIC plt.ylabel('Count')
+-- MAGIC plt.show()
+-- MAGIC
+-- MAGIC # 12. Duration Distribution
+-- MAGIC df_movies = df[df['type']=='Movie'].copy()
+-- MAGIC df_movies['duration'] = df_movies['duration'].str.replace(' min','').astype(float)
+-- MAGIC
+-- MAGIC sns.histplot(df_movies['duration'], bins=30, kde=True, color='skyblue')
+-- MAGIC plt.title('Distribution of Movie Duration (Minutes)')
+-- MAGIC plt.xlabel('Duration')
+-- MAGIC plt.ylabel('Count')
+-- MAGIC plt.show()
